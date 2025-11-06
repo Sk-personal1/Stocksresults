@@ -1,0 +1,43 @@
+name: Monitor BSE Results
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # so we can commit the updated state file
+    concurrency:
+      group: bse-results-notifier
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run notifier
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # optional: only these BSE codes, comma-separated. Example:
+          # WATCHLIST_CODES: "500325,532540"
+          WATCHLIST_CODES: ${{ vars.WATCHLIST_CODES }}
+          MAX_PAGES: "3"
+        run: python notify.py
+
+      - name: Commit updated state
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add last_announcement.json
+          git diff --staged --quiet || git commit -m "Update last announcement ID"
+          git push
