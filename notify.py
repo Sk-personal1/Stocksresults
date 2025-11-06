@@ -6,6 +6,9 @@ from typing import List, Dict, Any
 import requests
 from bse import BSE
 
+# Create downloads dir for BSE lib
+os.makedirs('downloads', exist_ok=True)
+
 # ----------------------------
 # Config via environment
 # ----------------------------
@@ -30,8 +33,11 @@ def load_state() -> int:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, dict) and data.get("last_id") is not None:
-                last_id = int(data["last_id"])
+            if isinstance(data, dict) and "last_id" in data:
+                try:
+                    last_id = int(data["last_id"])
+                except (ValueError, TypeError):
+                    last_id = -1
     except Exception as e:
         print(f"[warn] failed to read state: {e}", file=sys.stderr)
     return last_id
@@ -46,7 +52,7 @@ def save_state(last_id: int) -> None:
         print(f"[warn] failed to write state: {e}", file=sys.stderr)
 
 def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
-    bse = BSE()
+    bse = BSE(download_folder='downloads')
     anns: List[Dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         try:
@@ -98,7 +104,9 @@ def tg_send(text: str) -> None:
 
 def build_message(a: Dict[str, Any]) -> str:
     company = a.get("company_name") or a.get("company") or "Unknown Company"
-    subject = a.get("subject") or a.get("title") or "Corporate Announcement"
+    subject = (a.get("subject") or a.get("title") or "Corporate Announcement").strip()
+    if len(subject) > 100:
+        subject = subject[:100] + "..."
     date = a.get("date") or a.get("datetime") or ""
     code = a.get("scrip_code") or a.get("security_code") or ""
     # Links (whatever is available)
