@@ -55,10 +55,12 @@ def save_state(last_id: int) -> None:
 def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
     bse = BSE(download_folder='downloads')
     anns: List[Dict[str, Any]] = []
-    today = datetime.now().strftime('%d/%m/%Y')  # Today-only: 07/11/2025
     for page in range(1, max_pages + 1):
         try:
-            page_data = bse.announcements(page_no=page, fromdate=today, todate=today)
+            # Optional: Uncomment for today-only (library supports fromdate/todate as str 'dd/mm/yyyy')
+            # today = datetime.now().strftime('%d/%m/%Y')
+            # page_data = bse.announcements(page_no=page, fromdate=today, todate=today)
+            page_data = bse.announcements(page_no=page)  # Defaults to recent
         except Exception as e:
             print(f"[warn] bse.announcements(page_no={page}) failed: {e}", file=sys.stderr)
             break
@@ -182,16 +184,6 @@ def main():
 
     # Filter to watchlist + result-like announcements
     to_alert = [a for a in unseen if in_watchlist(a) and is_results_announcement(a)]
-
-    # TEMP DEBUG: Print matched subjects (remove after test)
-    if to_alert:
-        subjects = [a.get("ANN_TITLE", a.get("subject", "No subject")) for a in to_alert]
-        print(f"[debug] Matched subjects: {subjects}")
-    else:
-        print("[debug] No matches: Check regex on subjects")
-        # Print first unseen subject for check
-        if unseen:
-            print(f"[debug] Sample unseen subject: {unseen[0].get('ANN_TITLE', unseen[0].get('subject', 'No subject'))}")
 
     if to_alert:
         for a in to_alert:
