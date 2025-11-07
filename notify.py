@@ -22,9 +22,9 @@ MAX_PAGES = int("5")  # For recent coverage
 
 STATE_FILE = "last_announcement.json"
 
-# Regex for detecting "results" / Reg-33 style filings (in NEWSSUB/HEADLINE)
+# Stricter regex: Only actual "Financial Results" filings (no intimation/outcome)
 RESULTS_RE = re.compile(
-    r"(RESULT|RESULTS|FINANCIAL|REG[\s\.]*33|Q[1-4]\s*FY|QUARTER|UNAUDITED|AUDITED|YEAR\s*ENDED|STATEMENT\s+OF\s+STANDALONE|CONSOLIDATED)",
+    r"UNAUDITED\s*FINANCIAL\s*RESULTS|FINANCIAL\s*RESULTS|REG\s*\.?\s*33",
     re.I,
 )
 
@@ -78,7 +78,7 @@ def is_results_announcement(a: Dict[str, Any]) -> bool:
     matched = bool(RESULTS_RE.search(text))
     if matched:
         company = a.get("SCRIP_NAME", "Unknown") or parse_company_from_newssub(a.get("NEWSSUB", ""))
-        print(f"[debug] MATCHED result announcement for {company}: {newssub[:100]}")
+        print(f"[debug] MATCHED result announcement for {company}: {newssub[:100]}")  # Remove for production
     return matched
 
 def parse_company_from_newssub(newssub: str) -> str:
@@ -94,7 +94,9 @@ def is_today_announcement(a: Dict[str, Any]) -> bool:
     if not news_dt:
         return False
     today_str = datetime.now().strftime('%Y-%m-%d')
-    return news_dt.startswith(today_str)
+    # Trim to date part
+    news_date_part = news_dt.split('T')[0]
+    return news_date_part == today_str
 
 def in_watchlist(a: Dict[str, Any]) -> bool:
     if not WATCHLIST_CODES:
@@ -115,6 +117,7 @@ def tg_send(text: str) -> None:
     }
     try:
         r = requests.post(url, json=payload, timeout=20)
+        print(f"[info] Sent to Telegram: {r.status_code}")  # Temp for confirmation
         if r.status_code != 200:
             print(f"[warn] Telegram send failed: {r.status_code} {r.text}", file=sys.stderr)
     except Exception as e:
@@ -148,8 +151,8 @@ def build_message(a: Dict[str, Any]) -> str:
 def main():
     last_id = load_state()
     # TEMP TEST: Force all as new (remove after test)
-    last_id = -1
-    print(f"[info] Temp last_id reset to {last_id} for test")
+    # last_id = -1
+    # print(f"[info] Temp last_id reset to {last_id} for test")
     
     anns = fetch_announcements(MAX_PAGES)
     if not anns:
