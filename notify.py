@@ -5,7 +5,7 @@ import sys
 from typing import List, Dict, Any
 import requests
 from bse import BSE
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # Create downloads dir for BSE lib
 os.makedirs('downloads', exist_ok=True)
@@ -53,17 +53,11 @@ def save_state(last_id: int) -> None:
         print(f"[warn] failed to write state: {e}", file=sys.stderr)
 
 def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
-    # Fetch recent: last 7 days for coverage (adjust if needed)
-    from_date = datetime.now() - timedelta(days=7)
     bse = BSE(download_folder='downloads')
     anns: List[Dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         try:
-            page_data = bse.announcements(
-                page_no=page,
-                from_date=from_date,
-                segment='equity'  # Focus on equity; change if needed
-            )
+            page_data = bse.announcements(page_no=page)  # Defaults to today; no from_date/segment
         except Exception as e:
             print(f"[warn] bse.announcements(page_no={page}) failed: {e}", file=sys.stderr)
             break
@@ -73,6 +67,7 @@ def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
         # Heuristic: if fewer than 10, probably last page
         if len(page_data['Table']) < 10:
             break
+    print(f"[info] Fetched {len(anns)} announcements")  # TEMP DEBUG: Remove after test
     return anns
 
 def is_results_announcement(a: Dict[str, Any]) -> bool:
