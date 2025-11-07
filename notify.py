@@ -22,9 +22,9 @@ MAX_PAGES = int("5")  # For recent coverage
 
 STATE_FILE = "last_announcement.json"
 
-# Stricter regex: Only actual "Financial Results" filings (no intimation/outcome)
+# Stricter regex: Only actual "Financial Results" (skips intimation/outcome)
 RESULTS_RE = re.compile(
-    r"UNAUDITED\s*FINANCIAL\s*RESULTS|FINANCIAL\s*RESULTS|REG\s*\.?\s*33",
+    r"FINANCIAL\s*RESULT|UNAUDITED\s*FINANCIAL\s*RESULTS|REG\s*\.?\s*33",
     re.I,
 )
 
@@ -151,8 +151,8 @@ def build_message(a: Dict[str, Any]) -> str:
 def main():
     last_id = load_state()
     # TEMP TEST: Force all as new (remove after test)
-    # last_id = -1
-    # print(f"[info] Temp last_id reset to {last_id} for test")
+    last_id = -1
+    print(f"[info] Temp last_id reset to {last_id} for test"
     
     anns = fetch_announcements(MAX_PAGES)
     if not anns:
