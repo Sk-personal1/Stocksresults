@@ -15,6 +15,9 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Full history for rebase
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,8 +31,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # optional: only these BSE codes, comma-separated. Example:
-          # WATCHLIST_CODES: "500325,532540"
           WATCHLIST_CODES: ${{ vars.WATCHLIST_CODES }}
           MAX_PAGES: "3"
         run: python notify.py
@@ -38,6 +39,11 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          git pull --rebase origin main  # Safe merge: Pull remote first, rebase local
           git add last_announcement.json
-          git diff --staged --quiet || git commit -m "Update last announcement ID"
-          git push
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update last announcement ID"
+            git push origin main
+          fi
