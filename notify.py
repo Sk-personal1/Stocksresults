@@ -5,6 +5,7 @@ import sys
 from typing import List, Dict, Any
 import requests
 from bse import BSE
+from datetime import datetime, timedelta
 
 # Create downloads dir for BSE lib
 os.makedirs('downloads', exist_ok=True)
@@ -52,26 +53,32 @@ def save_state(last_id: int) -> None:
         print(f"[warn] failed to write state: {e}", file=sys.stderr)
 
 def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
+    # Fetch recent: last 7 days for coverage (adjust if needed)
+    from_date = datetime.now() - timedelta(days=7)
     bse = BSE(download_folder='downloads')
     anns: List[Dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         try:
-            page_data = bse.announcements(page=page)
+            page_data = bse.announcements(
+                page_no=page,
+                from_date=from_date,
+                segment='equity'  # Focus on equity; change if needed
+            )
         except Exception as e:
-            print(f"[warn] bse.announcements(page={page}) failed: {e}", file=sys.stderr)
+            print(f"[warn] bse.announcements(page_no={page}) failed: {e}", file=sys.stderr)
             break
-        if not page_data:
+        if not page_data or not page_data.get('Table'):
             break
-        anns.extend(page_data)
-        # heuristic: if fewer than 10, probably last page
-        if len(page_data) < 10:
+        anns.extend(page_data['Table'])
+        # Heuristic: if fewer than 10, probably last page
+        if len(page_data['Table']) < 10:
             break
     return anns
 
 def is_results_announcement(a: Dict[str, Any]) -> bool:
-    # Check subject + any available text fields
+    # Check subject + any available text fields (BSE-specific keys)
     fields = []
-    for key in ("subject", "title", "headline", "description"):
+    for key in ("ANN_TITLE", "ANN_TYPE", "description", "title"):
         v = (a.get(key) or "").strip()
         if v:
             fields.append(v)
@@ -81,8 +88,8 @@ def is_results_announcement(a: Dict[str, Any]) -> bool:
 def in_watchlist(a: Dict[str, Any]) -> bool:
     if not WATCHLIST_CODES:
         return True
-    # bse lib may supply 'scrip_code' or 'security_code'
-    code = str(a.get("scrip_code") or a.get("security_code") or "").strip()
+    # BSE lib supplies 'SCRIP_CD'
+    code = str(a.get("SCRIP_CD") or "").strip()
     return code in WATCHLIST_CODES
 
 def tg_send(text: str) -> None:
@@ -103,9 +110,82 @@ def tg_send(text: str) -> None:
         print(f"[warn] Telegram send error: {e}", file=sys.stderr)
 
 def build_message(a: Dict[str, Any]) -> str:
-    company = a.get("company_name") or a.get("company") or "Unknown Company"
-    subject = (a.get("subject") or a.get("title") or "Corporate Announcement").strip()
+    company = a.get("SCRIP_NAME") or a.get("company") or "Unknown Company"
+    subject = (a.get("ANN_TITLE") or a.get("subject") or "Corporate Announcement").strip()
     if len(subject) > 100:
+        subject = subject[:100] + "..."
+    date = a.get("ANN_DT") or a.get("date") or ""
+    code = a.get("SCRIP_CD") or ""
+    # Links (BSE often has PDF_URL or attachment)
+    pdf_url = a.get("PDF_URL") or a.get("attachment") or ""
+    url = a.get("URL") or a.get("link") or pdf_url
+
+    lines = [
+        "🔔 New BSE Financial Result",
+        f"🏢 Company: {company} ({code})" if code else f"🏢 Company: {company}",
+        f"📝 Subject: {subject}",
+    ]
+    if date:
+        lines.append(f"📅 Time: {date}")
+    if url:
+        lines.append(f"🔗 Link: {url}")
+    elif pdf_url:
+        lines.append(f"📄 PDF: {pdf_url}")
+    return "\n".join(lines)
+
+def main():
+    last_id = load_state()
+    anns = fetch_announcements(MAX_PAGES)
+    if not anns:
+        print("[info] no announcements fetched")
+        return
+
+    # Normalize IDs: Try common BSE ID fields (S_NO is sequential)
+    norm = []
+    for a in anns:
+        try:
+            aid = int(
+                a.get("S_NO") or
+                a.get("SEQ_NO") or
+                a.get("id") or
+                0
+            )
+            if aid == 0:
+                raise ValueError("No valid ID")
+        except Exception:
+            continue
+        a["_id"] = aid
+        norm.append(a)
+
+    if not norm:
+        print("[info] no normalized announcements with id")
+        return
+
+    # Sort by ID ascending so we send oldest first (nice sequencing)
+    norm.sort(key=lambda x: x["_id"])
+
+    # Determine the newest id we saw this run (for state)
+    newest_id_this_run = max(x["_id"] for x in norm)
+
+    # Scan only the unseen ones
+    unseen = [a for a in norm if a["_id"] > (last_id if last_id is not None else -1)]
+
+    # Filter to watchlist + result-like announcements
+    to_alert = [a for a in unseen if in_watchlist(a) and is_results_announcement(a)]
+
+    if to_alert:
+        for a in to_alert:
+            tg_send(build_message(a))
+        print(f"[info] sent {len(to_alert)} alert(s)")
+    else:
+        print("[info] no new results announcements to send")
+
+    # Always advance state to newest seen, even if none matched filter,
+    # so we don't reprocess the same IDs forever.
+    save_state(newest_id_this_run)
+
+if __name__ == "__main__":
+    main()    if len(subject) > 100:
         subject = subject[:100] + "..."
     date = a.get("date") or a.get("datetime") or ""
     code = a.get("scrip_code") or a.get("security_code") or ""
