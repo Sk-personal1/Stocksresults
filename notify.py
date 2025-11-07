@@ -11,20 +11,20 @@ from datetime import datetime
 os.makedirs('downloads', exist_ok=True)
 
 # ----------------------------
-# Config via environment
+# Config (hardcoded for direct run)
 # ----------------------------
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+BOT_TOKEN = "8250933662:AAFp5oIujh2GxlNZLq2yXFyL4gKOsZm1mXI"
+CHAT_ID = "7526048845"
 # Comma-separated BSE codes (e.g., "500325,532540") — leave empty for ALL
-WATCHLIST_CODES = [s.strip() for s in os.environ.get("WATCHLIST_CODES", "").split(",") if s.strip()]
+WATCHLIST_CODES = [s.strip() for s in "".split(",") if s.strip()]  # Empty for all
 # Max pages to scan each run (10 announcements per page typically)
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "3"))
+MAX_PAGES = int("5")  # For recent coverage
 
 STATE_FILE = "last_announcement.json"
 
-# Regex for detecting "results" / Reg-33 style filings (subject/title text)
+# Regex for detecting "results" / Reg-33 style filings (in NEWSSUB/HEADLINE)
 RESULTS_RE = re.compile(
-    r"(RESULT|FINANCIAL|REG[\s\.]*33|Q[1-4]\s*FY|QUARTER|UNAUDITED|AUDITED|YEAR\s*ENDED|STATEMENT\s+OF\s+STANDALONE|CONSOLIDATED)",
+    r"(RESULT|RESULTS|FINANCIAL|REG[\s\.]*33|Q[1-4]\s*FY|QUARTER|UNAUDITED|AUDITED|YEAR\s*ENDED|STATEMENT\s+OF\s+STANDALONE|CONSOLIDATED)",
     re.I,
 )
 
@@ -57,10 +57,7 @@ def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
     anns: List[Dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         try:
-            # Optional: Uncomment for today-only (library supports fromdate/todate as str 'dd/mm/yyyy')
-            # today = datetime.now().strftime('%d/%m/%Y')
-            # page_data = bse.announcements(page_no=page, fromdate=today, todate=today)
-            page_data = bse.announcements(page_no=page)  # Defaults to recent
+            page_data = bse.announcements(page_no=page)
         except Exception as e:
             print(f"[warn] bse.announcements(page_no={page}) failed: {e}", file=sys.stderr)
             break
@@ -74,20 +71,36 @@ def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
     return anns
 
 def is_results_announcement(a: Dict[str, Any]) -> bool:
-    # Check subject + any available text fields (BSE-specific keys)
-    fields = []
-    for key in ("ANN_TITLE", "ANN_TYPE", "description", "title", "subject"):
-        v = (a.get(key) or "").strip()
-        if v:
-            fields.append(v)
-    text = " | ".join(fields)
-    return bool(RESULTS_RE.search(text))
+    # Targeted search in NEWSSUB and HEADLINE only (BSE keys)
+    newssub = (a.get("NEWSSUB", "") or "").upper()
+    headline = (a.get("HEADLINE", "") or "").upper()
+    text = newssub + " " + headline
+    matched = bool(RESULTS_RE.search(text))
+    if matched:
+        company = a.get("SCRIP_NAME", "Unknown") or parse_company_from_newssub(a.get("NEWSSUB", ""))
+        print(f"[debug] MATCHED result announcement for {company}: {newssub[:100]}")
+    return matched
+
+def parse_company_from_newssub(newssub: str) -> str:
+    if not newssub:
+        return "Unknown"
+    # Parse first part before '-' (e.g., "WPIL Ltd" from "WPIL Ltd - 505872 - ...")
+    parts = newssub.split('-', 1)
+    return parts[0].strip() if parts else "Unknown"
+
+def is_today_announcement(a: Dict[str, Any]) -> bool:
+    # Check if announcement date is today (NEWS_DT format 'YYYY-MM-DDTHH:MM:SS.53')
+    news_dt = a.get("NEWS_DT", "").strip()
+    if not news_dt:
+        return False
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    return news_dt.startswith(today_str)
 
 def in_watchlist(a: Dict[str, Any]) -> bool:
     if not WATCHLIST_CODES:
         return True
     # BSE lib supplies 'SCRIP_CD'
-    code = str(a.get("SCRIP_CD") or a.get("scrip_code") or "").strip()
+    code = str(a.get("SCRIP_CD") or "").strip()
     return code in WATCHLIST_CODES
 
 def tg_send(text: str) -> None:
@@ -108,15 +121,16 @@ def tg_send(text: str) -> None:
         print(f"[warn] Telegram send error: {e}", file=sys.stderr)
 
 def build_message(a: Dict[str, Any]) -> str:
-    company = a.get("SCRIP_NAME") or a.get("company_name") or a.get("company") or "Unknown Company"
-    subject = (a.get("ANN_TITLE") or a.get("subject") or "Corporate Announcement").strip()
+    company = parse_company_from_newssub(a.get("NEWSSUB", "")) or "Unknown Company"
+    subject = (a.get("NEWSSUB", "") or a.get("HEADLINE", "") or "Corporate Announcement").strip()
     if len(subject) > 100:
         subject = subject[:100] + "..."
-    date = a.get("ANN_DT") or a.get("date") or ""
-    code = a.get("SCRIP_CD") or a.get("scrip_code") or ""
-    # Links (BSE often has PDF_URL or attachment)
-    pdf_url = a.get("PDF_URL") or a.get("pdf_url") or a.get("attachment") or ""
-    url = a.get("URL") or a.get("link") or pdf_url
+    date = a.get("NEWS_DT", "") or ""
+    code = str(a.get("SCRIP_CD", ""))
+    # PDF URL: BSE standard for attachment
+    attachment = a.get("ATTACHMENTNAME", "")
+    pdf_url = f"https://www.bseindia.com/xml-data/corpfiling_attachments/{attachment}" if attachment else ""
+    url = a.get("URL", "") or pdf_url
 
     lines = [
         "🔔 New BSE Financial Result",
@@ -133,6 +147,10 @@ def build_message(a: Dict[str, Any]) -> str:
 
 def main():
     last_id = load_state()
+    # TEMP TEST: Force all as new (remove after test)
+    last_id = -1
+    print(f"[info] Temp last_id reset to {last_id} for test")
+    
     anns = fetch_announcements(MAX_PAGES)
     if not anns:
         print("[info] no announcements fetched")
@@ -181,9 +199,20 @@ def main():
 
     # Scan only the unseen ones
     unseen = [a for a in norm if a["_id"] > (last_id if last_id is not None else -1)]
+    print(f"[debug] Len unseen: {len(unseen)}")  # TEMP DEBUG
 
-    # Filter to watchlist + result-like announcements
-    to_alert = [a for a in unseen if in_watchlist(a) and is_results_announcement(a)]
+    # Filter to watchlist + result-like announcements + today only
+    to_alert = [a for a in unseen if in_watchlist(a) and is_results_announcement(a) and is_today_announcement(a)]
+
+    # TEMP DEBUG: Print matched subjects (remove after test)
+    if to_alert:
+        subjects = [a.get("NEWSSUB", a.get("HEADLINE", "No subject")) for a in to_alert]
+        print(f"[debug] Matched subjects: {subjects}")
+    else:
+        print("[debug] No matches: Check regex on subjects")
+        # Print first unseen subject for check
+        if unseen:
+            print(f"[debug] Sample unseen subject: {unseen[0].get('NEWSSUB', unseen[0].get('HEADLINE', 'No subject'))}")
 
     if to_alert:
         for a in to_alert:
