@@ -22,9 +22,9 @@ MAX_PAGES = int("5")  # For recent coverage
 
 STATE_FILE = "last_announcement.json"
 
-# Stricter regex: Only actual "Financial Results" (skips intimation/outcome)
+# Stricter regex: Only actual results (no "INTIMATION" or "OUTCOME" without results)
 RESULTS_RE = re.compile(
-    r"FINANCIAL\s*RESULT|UNAUDITED\s*FINANCIAL\s*RESULTS|REG\s*\.?\s*33",
+    r"(UNAUDITED\s*FINANCIAL\s*RESULTS|FINANCIAL\s*RESULTS|REG\s*\.?\s*33)",
     re.I,
 )
 
