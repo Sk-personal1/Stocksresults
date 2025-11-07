@@ -11,37 +11,48 @@ from datetime import datetime
 os.makedirs('downloads', exist_ok=True)
 
 # ----------------------------
-# Config (hardcoded for direct run)
+# Config
 # ----------------------------
-BOT_TOKEN = "8250933662:AAFp5oIujh2GxlNZLq2yXFyL4gKOsZm1mXI"
-CHAT_ID = "7526048845"
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "REPLACE_ME"
+CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID") or "REPLACE_ME"
+
 # Comma-separated BSE codes (e.g., "500325,532540") — leave empty for ALL
-WATCHLIST_CODES = [s.strip() for s in "".split(",") if s.strip()]  # Empty for all
-# Max pages to scan each run (10 announcements per page typically)
-MAX_PAGES = int("5")  # For recent coverage
+WATCHLIST_CODES = [s.strip() for s in os.environ.get("WATCHLIST_CODES", "").split(",") if s.strip()]  # Empty = all
+
+# Max pages to scan each run (10 announcements/page typically)
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "5"))
+
+# Cap how many messages to send per run (prevents 86 at once)
+MAX_ALERTS_PER_RUN = int(os.environ.get("MAX_ALERTS_PER_RUN", "10"))
+
+# If state file is missing/corrupt (first run), just record latest ID and exit (no spam)
+BOOTSTRAP_IF_EMPTY = os.environ.get("BOOTSTRAP_IF_EMPTY", "1") == "1"
 
 STATE_FILE = "last_announcement.json"
 
-# Stricter regex: Only actual results (no "INTIMATION" or "OUTCOME" without results)
+# Stricter regex: Only actual results (avoid plain outcome/intimation noise)
 RESULTS_RE = re.compile(
     r"(UNAUDITED\s*FINANCIAL\s*RESULTS|FINANCIAL\s*RESULTS|REG\s*\.?\s*33)",
     re.I,
 )
 
-def load_state() -> int:
-    last_id = -1
+# ----------------------------
+# State
+# ----------------------------
+def load_state():
+    """Return (last_id:int|None, is_bootstrap_needed:bool)."""
+    if not os.path.exists(STATE_FILE):
+        return (None, True)
     try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and "last_id" in data:
-                try:
-                    last_id = int(data["last_id"])
-                except (ValueError, TypeError):
-                    last_id = -1
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        last_id = data.get("last_id", None)
+        if last_id is None:
+            return (None, True)
+        return (int(last_id), False)
     except Exception as e:
         print(f"[warn] failed to read state: {e}", file=sys.stderr)
-    return last_id
+        return (None, True)
 
 def save_state(last_id: int) -> None:
     tmp = STATE_FILE + ".tmp"
@@ -52,61 +63,71 @@ def save_state(last_id: int) -> None:
     except Exception as e:
         print(f"[warn] failed to write state: {e}", file=sys.stderr)
 
+# ----------------------------
+# Fetch
+# ----------------------------
 def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
     bse = BSE(download_folder='downloads')
     anns: List[Dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         try:
-            page_data = bse.announcements(page_no=page)
+            # note: some versions use 'page' and others 'page_no'
+            page_data = None
+            try:
+                page_data = bse.announcements(page_no=page)
+            except TypeError:
+                page_data = bse.announcements(page=page)
         except Exception as e:
-            print(f"[warn] bse.announcements(page_no={page}) failed: {e}", file=sys.stderr)
+            print(f"[warn] bse.announcements(page={page}) failed: {e}", file=sys.stderr)
             break
-        if not page_data or not page_data.get('Table', []):
+        if not page_data:
             break
-        page_anns = page_data.get('Table', [])
-        anns.extend(page_anns)
-        if len(page_anns) < 10:
+        table = page_data.get('Table') if isinstance(page_data, dict) else page_data
+        if not table:
             break
-    print(f"[info] Fetched {len(anns)} announcements")
+        anns.extend(table)
+        if len(table) < 10:
+            break
+    print(f"[info] fetched {len(anns)} announcements")
     return anns
 
+# ----------------------------
+# Filters
+# ----------------------------
 def is_results_announcement(a: Dict[str, Any]) -> bool:
-    # Targeted search in NEWSSUB and HEADLINE only (BSE keys)
     newssub = (a.get("NEWSSUB", "") or "").upper()
     headline = (a.get("HEADLINE", "") or "").upper()
     text = newssub + " " + headline
-    matched = bool(RESULTS_RE.search(text))
-    if matched:
-        company = a.get("SCRIP_NAME", "Unknown") or parse_company_from_newssub(a.get("NEWSSUB", ""))
-        print(f"[debug] MATCHED result announcement for {company}: {newssub[:100]}")  # Remove for production
-    return matched
+    return bool(RESULTS_RE.search(text))
 
 def parse_company_from_newssub(newssub: str) -> str:
     if not newssub:
         return "Unknown"
-    # Parse first part before '-' (e.g., "WPIL Ltd" from "WPIL Ltd - 505872 - ...")
     parts = newssub.split('-', 1)
     return parts[0].strip() if parts else "Unknown"
 
 def is_today_announcement(a: Dict[str, Any]) -> bool:
-    # Check if announcement date is today (NEWS_DT format 'YYYY-MM-DDTHH:MM:SS.53')
-    news_dt = a.get("NEWS_DT", "").strip()
+    news_dt = (a.get("NEWS_DT", "") or "").strip()
     if not news_dt:
         return False
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    # Trim to date part
-    news_date_part = news_dt.split('T')[0]
-    return news_date_part == today_str
+    try:
+        # NEWS_DT format like '2025-11-07T16:35:12.53'
+        d = news_dt.split('T')[0]
+        return d == datetime.now().strftime('%Y-%m-%d')
+    except Exception:
+        return False
 
 def in_watchlist(a: Dict[str, Any]) -> bool:
     if not WATCHLIST_CODES:
         return True
-    # BSE lib supplies 'SCRIP_CD'
     code = str(a.get("SCRIP_CD") or "").strip()
     return code in WATCHLIST_CODES
 
+# ----------------------------
+# Telegram
+# ----------------------------
 def tg_send(text: str) -> None:
-    if not (BOT_TOKEN and CHAT_ID):
+    if not (BOT_TOKEN and CHAT_ID) or "REPLACE_ME" in (BOT_TOKEN + CHAT_ID):
         print("[warn] Telegram not configured; skipping send")
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -117,7 +138,6 @@ def tg_send(text: str) -> None:
     }
     try:
         r = requests.post(url, json=payload, timeout=20)
-        print(f"[info] Sent to Telegram: {r.status_code}")  # Temp for confirmation
         if r.status_code != 200:
             print(f"[warn] Telegram send failed: {r.status_code} {r.text}", file=sys.stderr)
     except Exception as e:
@@ -126,11 +146,10 @@ def tg_send(text: str) -> None:
 def build_message(a: Dict[str, Any]) -> str:
     company = parse_company_from_newssub(a.get("NEWSSUB", "")) or "Unknown Company"
     subject = (a.get("NEWSSUB", "") or a.get("HEADLINE", "") or "Corporate Announcement").strip()
-    if len(subject) > 100:
-        subject = subject[:100] + "..."
+    if len(subject) > 180:
+        subject = subject[:177] + "..."
     date = a.get("NEWS_DT", "") or ""
-    code = str(a.get("SCRIP_CD", ""))
-    # PDF URL: BSE standard for attachment
+    code = str(a.get("SCRIP_CD", "") or "")
     attachment = a.get("ATTACHMENTNAME", "")
     pdf_url = f"https://www.bseindia.com/xml-data/corpfiling_attachments/{attachment}" if attachment else ""
     url = a.get("URL", "") or pdf_url
@@ -144,88 +163,75 @@ def build_message(a: Dict[str, Any]) -> str:
         lines.append(f"📅 Time: {date}")
     if url:
         lines.append(f"🔗 Link: {url}")
-    elif pdf_url:
-        lines.append(f"📄 PDF: {pdf_url}")
     return "\n".join(lines)
 
+# ----------------------------
+# Main
+# ----------------------------
 def main():
-    last_id = load_state()
-    # TEMP TEST: Force all as new (remove after test)
-    last_id = -1
-    print(f"[info] Temp last_id reset to {last_id} for test")
-    
+    last_id, need_bootstrap = load_state()
+
     anns = fetch_announcements(MAX_PAGES)
     if not anns:
         print("[info] no announcements fetched")
         return
 
-    # Normalize IDs: Robust parsing with fallback sequential
+    # Normalize IDs (prefer S_NO → SEQ_NO → id). Fallback to index order.
     norm = []
     fallback_counter = 1
-    for i, a in enumerate(anns):
-        try:
-            # Try BSE standard 'S_NO' first (string/float -> int)
-            sno = a.get("S_NO")
-            if sno is not None:
-                aid = int(str(sno).strip())
-            else:
-                # Fallback to other fields
-                aid = int(str(a.get("SEQ_NO") or a.get("id") or 0).strip())
-            if aid > 0:
-                a["_id"] = aid
-                norm.append(a)
-                continue
-        except (ValueError, TypeError):
-            pass  # Fall through to fallback
-        # Fallback: Assign sequential ID based on index (assumes ordered by recency)
-        a["_id"] = fallback_counter
+    for a in anns:
+        aid = None
+        for key in ("S_NO", "SEQ_NO", "id"):
+            v = a.get(key, None)
+            if v is not None:
+                try:
+                    aid = int(str(v).strip())
+                    break
+                except Exception:
+                    pass
+        if aid is None:
+            aid = fallback_counter
+            fallback_counter += 1
+        a["_id"] = aid
         norm.append(a)
-        fallback_counter += 1
 
     if not norm:
         print("[info] no normalized announcements with id")
-        # Debug: Print sample to diagnose
-        if anns:
-            sample = anns[0]
-            print(f"[debug] Sample announcement keys: {list(sample.keys())}")
-            for k, v in sample.items():
-                print(f"[debug]   {k}: {str(v)[:50]}...")
         return
 
-    print(f"[info] Normalized {len(norm)} announcements")
-
-    # Sort by ID ascending so we send oldest first (nice sequencing)
+    # Sort ascending so we send oldest first
     norm.sort(key=lambda x: x["_id"])
-
-    # Determine the newest id we saw this run (for state)
     newest_id_this_run = max(x["_id"] for x in norm)
 
-    # Scan only the unseen ones
-    unseen = [a for a in norm if a["_id"] > (last_id if last_id is not None else -1)]
-    print(f"[debug] Len unseen: {len(unseen)}")  # TEMP DEBUG
+    # First-run bootstrap to avoid spamming 80+ old items
+    if need_bootstrap and BOOTSTRAP_IF_EMPTY:
+        save_state(newest_id_this_run)
+        print(f"[info] bootstrap: recorded last_id={newest_id_this_run}, sent 0 alerts")
+        return
 
-    # Filter to watchlist + result-like announcements + today only
-    to_alert = [a for a in unseen if in_watchlist(a) and is_results_announcement(a) and is_today_announcement(a)]
+    baseline = -1 if last_id is None else int(last_id)
+    unseen = [a for a in norm if a["_id"] > baseline]
 
-    # TEMP DEBUG: Print matched subjects (remove after test)
-    if to_alert:
-        subjects = [a.get("NEWSSUB", a.get("HEADLINE", "No subject")) for a in to_alert]
-        print(f"[debug] Matched subjects: {subjects}")
-    else:
-        print("[debug] No matches: Check regex on subjects")
-        # Print first unseen subject for check
-        if unseen:
-            print(f"[debug] Sample unseen subject: {unseen[0].get('NEWSSUB', unseen[0].get('HEADLINE', 'No subject'))}")
+    # Filter to watchlist + results + today
+    filtered = [a for a in unseen if in_watchlist(a) and is_results_announcement(a) and is_today_announcement(a)]
 
-    if to_alert:
-        for a in to_alert:
-            tg_send(build_message(a))
-        print(f"[info] sent {len(to_alert)} alert(s)")
-    else:
-        print("[info] no new results announcements to send")
+    # Cap per run to avoid flooding
+    to_alert = filtered[:MAX_ALERTS_PER_RUN]
 
-    # Always advance state to newest seen, even if none matched filter,
-    # so we don't reprocess the same IDs forever.
+    # Optional: if we truncated, send a summary notice at the end
+    truncated_count = max(0, len(filtered) - len(to_alert))
+
+    sent = 0
+    for a in to_alert:
+        tg_send(build_message(a))
+        sent += 1
+
+    if truncated_count > 0:
+        tg_send(f"⏳ More results detected: {truncated_count} additional announcement(s) held to avoid spam. They will be sent in the next cycles.")
+
+    print(f"[info] sent {sent} alert(s); truncated={truncated_count}; unseen={len(unseen)}")
+
+    # Advance state to newest seen id so we don't resend
     save_state(newest_id_this_run)
 
 if __name__ == "__main__":
