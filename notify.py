@@ -57,23 +57,26 @@ def fetch_announcements(max_pages: int) -> List[Dict[str, Any]]:
     anns: List[Dict[str, Any]] = []
     for page in range(1, max_pages + 1):
         try:
-            page_data = bse.announcements(page_no=page)  # Defaults to today; no from_date/segment
+            # Optional: Uncomment for today-only (library supports fromdate/todate as str 'dd/mm/yyyy')
+            # today = datetime.now().strftime('%d/%m/%Y')
+            # page_data = bse.announcements(page_no=page, fromdate=today, todate=today)
+            page_data = bse.announcements(page_no=page)  # Defaults to recent
         except Exception as e:
             print(f"[warn] bse.announcements(page_no={page}) failed: {e}", file=sys.stderr)
             break
-        if not page_data or not page_data.get('Table'):
+        if not page_data or not page_data.get('Table', []):
             break
-        anns.extend(page_data['Table'])
-        # Heuristic: if fewer than 10, probably last page
-        if len(page_data['Table']) < 10:
+        page_anns = page_data.get('Table', [])
+        anns.extend(page_anns)
+        if len(page_anns) < 10:
             break
-    print(f"[info] Fetched {len(anns)} announcements")  # TEMP DEBUG: Remove after test
+    print(f"[info] Fetched {len(anns)} announcements")
     return anns
 
 def is_results_announcement(a: Dict[str, Any]) -> bool:
     # Check subject + any available text fields (BSE-specific keys)
     fields = []
-    for key in ("ANN_TITLE", "ANN_TYPE", "description", "title"):
+    for key in ("ANN_TITLE", "ANN_TYPE", "description", "title", "subject"):
         v = (a.get(key) or "").strip()
         if v:
             fields.append(v)
@@ -84,7 +87,7 @@ def in_watchlist(a: Dict[str, Any]) -> bool:
     if not WATCHLIST_CODES:
         return True
     # BSE lib supplies 'SCRIP_CD'
-    code = str(a.get("SCRIP_CD") or "").strip()
+    code = str(a.get("SCRIP_CD") or a.get("scrip_code") or "").strip()
     return code in WATCHLIST_CODES
 
 def tg_send(text: str) -> None:
@@ -94,7 +97,7 @@ def tg_send(text: str) -> None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
-        "text": text,  # keep simple; no parse_mode to avoid escaping issues
+        "text": text,
         "disable_web_page_preview": True,
     }
     try:
@@ -105,14 +108,14 @@ def tg_send(text: str) -> None:
         print(f"[warn] Telegram send error: {e}", file=sys.stderr)
 
 def build_message(a: Dict[str, Any]) -> str:
-    company = a.get("SCRIP_NAME") or a.get("company") or "Unknown Company"
+    company = a.get("SCRIP_NAME") or a.get("company_name") or a.get("company") or "Unknown Company"
     subject = (a.get("ANN_TITLE") or a.get("subject") or "Corporate Announcement").strip()
     if len(subject) > 100:
         subject = subject[:100] + "..."
     date = a.get("ANN_DT") or a.get("date") or ""
-    code = a.get("SCRIP_CD") or ""
+    code = a.get("SCRIP_CD") or a.get("scrip_code") or ""
     # Links (BSE often has PDF_URL or attachment)
-    pdf_url = a.get("PDF_URL") or a.get("attachment") or ""
+    pdf_url = a.get("PDF_URL") or a.get("pdf_url") or a.get("attachment") or ""
     url = a.get("URL") or a.get("link") or pdf_url
 
     lines = [
@@ -135,26 +138,40 @@ def main():
         print("[info] no announcements fetched")
         return
 
-    # Normalize IDs: Try common BSE ID fields (S_NO is sequential)
+    # Normalize IDs: Robust parsing with fallback sequential
     norm = []
-    for a in anns:
+    fallback_counter = 1
+    for i, a in enumerate(anns):
         try:
-            aid = int(
-                a.get("S_NO") or
-                a.get("SEQ_NO") or
-                a.get("id") or
-                0
-            )
-            if aid == 0:
-                raise ValueError("No valid ID")
-        except Exception:
-            continue
-        a["_id"] = aid
+            # Try BSE standard 'S_NO' first (string/float -> int)
+            sno = a.get("S_NO")
+            if sno is not None:
+                aid = int(str(sno).strip())
+            else:
+                # Fallback to other fields
+                aid = int(str(a.get("SEQ_NO") or a.get("id") or 0).strip())
+            if aid > 0:
+                a["_id"] = aid
+                norm.append(a)
+                continue
+        except (ValueError, TypeError):
+            pass  # Fall through to fallback
+        # Fallback: Assign sequential ID based on index (assumes ordered by recency)
+        a["_id"] = fallback_counter
         norm.append(a)
+        fallback_counter += 1
 
     if not norm:
         print("[info] no normalized announcements with id")
+        # Debug: Print sample to diagnose
+        if anns:
+            sample = anns[0]
+            print(f"[debug] Sample announcement keys: {list(sample.keys())}")
+            for k, v in sample.items():
+                print(f"[debug]   {k}: {str(v)[:50]}...")
         return
+
+    print(f"[info] Normalized {len(norm)} announcements")
 
     # Sort by ID ascending so we send oldest first (nice sequencing)
     norm.sort(key=lambda x: x["_id"])
