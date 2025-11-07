@@ -152,7 +152,7 @@ def main():
     last_id = load_state()
     # TEMP TEST: Force all as new (remove after test)
     last_id = -1
-    print(f"[info] Temp last_id reset to {last_id} for test"
+    print(f"[info] Temp last_id reset to {last_id} for test")
     
     anns = fetch_announcements(MAX_PAGES)
     if not anns:
