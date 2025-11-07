@@ -39,8 +39,12 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git pull --rebase origin main  # Safe merge: Pull remote first, rebase local
-          git add last_announcement.json
+          git add last_announcement.json  # Stage our changes first
+          # Stash any extras, pull/rebase, pop, re-add
+          git stash push -m "temp stash for rebase" || true
+          git pull --rebase origin main
+          git stash pop || true  # Pop if stashed
+          git add .  # Re-stage after merge
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
